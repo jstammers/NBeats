@@ -26,12 +26,11 @@ class StackWeight(Enum):
 # ## Defining the basic block
 # The basic block structure is a fully connected layer
 # %%
-class NBeatsBlock(tf.keras.models.Model):
+class NBeatsBlock(tf.keras.layers.Layer):
     def __init__(
         self,
-        input_layer: Input,
+        input_shape: int,
         fc_width: int,
-        fc_layer_num: int,
         forecast_horizon: int,
         lookback_window: int,
         trend_order: int,
@@ -42,67 +41,77 @@ class NBeatsBlock(tf.keras.models.Model):
     ):
         """Creates a basic block layer. This outputs a back-cast of its input as well as a forecast with a length equal to the forecast horizon.
         """
+        super(NBeatsBlock, self).__init__(*args, **kwargs)
+        self.stack_weights = stack_weights
+        self.fc_width=fc_width
+        self.forecast_horizon=forecast_horizon
+        self.lookback_window=lookback_window
+        self.trend_order=trend_order
+        self.base_name = base_name
+        self.init_layers = [Dense(
+                self.fc_width, activation=tf.keras.activations.relu, name=f"{self.base_name}_fc_layer_{i}"
+            ) for i in range(4)]
 
-        block = input_layer
-        for i in range(fc_layer_num):
-            block = Dense(
-                fc_width, activation=tf.keras.activations.relu, name=f"{base_name}_fc_layer_{i}"
-            )(block)
+        self.backcast_weights, self.forecast_weights = self.create_output_weights()
 
-        backcast_weights, forecast_weights = self.create_output_weights(
-            forecast_horizon, lookback_window, trend_order, stack_weights
-        )
-
-        backcast_layer = Dense(units=trend_order, use_bias=False, activation='linear')(block)
-        
-        backcast_layer = Dense(
-            units=lookback_window,
-            weights=[backcast_weights],
+        self.backcast_projection = Dense(units=self.trend_order, use_bias=False, activation='linear')
+        self.backcast_layer = Dense(
+            units=self.lookback_window,
+            weights=[self.backcast_weights],
             activation = 'linear',
             use_bias = False,
-            name=f"{base_name}_backcast",
-        )(backcast_layer)
+            name=f"{self.base_name}_backcast",
+        )
+        self.forecast_projection = Dense(units=self.trend_order, use_bias=False, activation='linear')
 
-        forecast_layer = Dense(units=trend_order, use_bias=False, activation='linear', )(block)
-        forecast_layer = Dense(
-            units = forecast_horizon,
-            weights=[forecast_weights],
+        self.forecast_layer = Dense(
+            units = self.forecast_horizon,
+            weights=[self.forecast_weights],
             activation = 'linear',
             use_bias = False,
-            name=f"{base_name}_forecast",
-        )(forecast_layer)
-
-
-        # backcast_model = Model(inputs=[backcast_input], outputs=[input_tensor])
-        # forecast_model = Model(inputs=[forecast_input], outputs=[forecast_horizon])
-
-        super().__init__(
-            inputs=input_layer, outputs=[backcast_layer, forecast_layer], *args, **kwargs
+            name=f"{self.base_name}_forecast",
         )
+
     def build(self, input_shape):
-        pass
+        super(NBeatsBlock, self).build(input_shape)
+
+    def call(self, input_layer):
+        block = input_layer
+        for i in range(4):
+            block = self.init_layers[i](block)
+
+        backcast_layer = self.backcast_projection(block)
+        
+        backcast_layer = self.backcast_layer(backcast_layer)
+
+        forecast_layer = self.forecast_projection(block)
+
+        forecast_layer = self.forecast_layer(forecast_layer)
+
+        return [subtract([backcast_layer,input_layer]), forecast_layer]
+    
+    def compute_output_shape(self, input_shape):
+        return [self.lookback_window, self.forecast_horizon]
+
     def create_output_weights(
-        self,
-        forecast_horizon: int,
-        lookback_window: int,
-        trend_order: int,
-        stack_weights: StackWeight = StackWeight.none,
-    ) -> Tuple[np.array, np.array]:
-        stack_weights = StackWeight(stack_weights)
+        self) -> Tuple[np.array, np.array]:
 
-        forward_tvec = np.arange(0, forecast_horizon) / forecast_horizon
-        backwards_tvec = np.arange(0, lookback_window)/ lookback_window
+        forward_tvec = np.arange(0, self.forecast_horizon) / self.forecast_horizon
+        backwards_tvec = np.arange(0, self.lookback_window)/ self.lookback_window
 
-        if stack_weights == StackWeight.trend:
+        if self.stack_weights == StackWeight.trend:
             forecast_weights = np.array(
-                [forward_tvec ** i for i in range(0, trend_order)]
+                [forward_tvec ** i for i in range(0, self.trend_order)]
             )
             backcast_weights = np.array(
-                [backwards_tvec ** i for i in range(0, trend_order)]
+                [backwards_tvec ** i for i in range(0, self.trend_order)]
             )
-        elif stack_weights == StackWeight.seasonality:
+        elif self.stack_weights == StackWeight.seasonality:
             forecast_weights = [
                 np.ones_like(forward_tvec),
+            ]
+            backcast_weights = [
+                np.ones_like(backwards_tvec),
             ]
         else:
             forecast_weights = None
@@ -113,24 +122,22 @@ class NBeatsBlock(tf.keras.models.Model):
 # %%
 test_input = Input(shape=4)
 test_args = {
-    "input_layer": test_input,
+    "input_shape": (None,4),
     "fc_width": 5,
-    "fc_layer_num": 4,
     "forecast_horizon": 20,
     "lookback_window": 4,
     "trend_order": 3,
     "stack_weights": StackWeight.trend,
 }
 
-test_block = NBeatsBlock(**test_args)
-test_2 = test_block(test_input)
+test_block = NBeatsBlock(**test_args, dynamic=True)
+test_2 = test_block(tf.ones(shape=(5, 1)))
 # %% [markdown]
 # Defining an NBeats stack
 # %%
-class NBeatsStack(tf.keras.models.Model):
+class NBeatsStack(tf.keras.layers.Layer):
     def __init__(
         self,
-        input_layer: Input,
         fc_width: int,
         forecast_horizon: int,
         lookback_window: int,
@@ -140,32 +147,41 @@ class NBeatsStack(tf.keras.models.Model):
         *args,
         **kwargs
     ) -> None:
+        self.fc_width = fc_width
+        self.forecast_horizon = forecast_horizon
+        self.lookback_window = lookback_window
+        self.trend_order = trend_order
+        self.stack_weights = stack_weights
+        self.block_length = block_length
+        super(NBeatsStack, self).__init__(**kwargs)
+    
+    def build(self, input_shape):
+        super(NBeatsStack, self).build(input_shape)
 
+    def call(self, input_layer):
         model = NBeatsBlock(
-            input_layer,
-            fc_width=fc_width,
-            fc_layer_num=0,
-            forecast_horizon=forecast_horizon,
-            lookback_window=lookback_window,
-            trend_order=trend_order,
-            stack_weights=stack_weights,
+            input_shape = input_layer.shape,
+            fc_width=self.fc_width,
+            forecast_horizon=self.forecast_horizon,
+            lookback_window=self.lookback_window,
+            trend_order=self.trend_order,
+            stack_weights=self.stack_weights,
         )
+        backcast, forecast = model(input_layer)
+        backcasts = [backcast]
+        forecasts = [forecast]
+        for i in range(1, self.block_length):
+            backcast, forecast  = model(backcast)
+            backcasts.append(backcast)
+            forecasts.append(forecast)
+        return [backcasts[-1],add(forecasts)]
 
-        backcasts = [model.output[0]]
-        forecasts = [model.output[1]]
 
-        for i in range(1, block_length):
-            input_layer = subtract([model.input, model.output[0]])
-
-            model = model(input_layer)
-
-            backcasts.append(model.output[0])
-            forecasts.append(model.output[1])
-
-        super().__init__(inputs=input_layer, outputs=add(forecasts), *args, **kwargs)
+    def compute_output_shape(self, input_shape):
+        [self.lookback_window,self.forecast_horizon]
 
 # %%
-test_stack = NBeatsStack(**test_args, block_length=3)
+test_stack = NBeatsStack(**test_args, block_length=3,dynamic=True)(test_input)
 # %% [markdown]
 # ## Defining the NBeats model
 # %%
@@ -194,25 +210,25 @@ class NBeats(tf.keras.models.Model):
         stack_length : int
             The number of stacks in the model
         """
-        input_tensor = Input(shape=4)
+        input_tensor = Input(shape=(lookback_window,))
+
         self.stack_weight = StackWeight.trend
         self.fc_width=fc_width
         self.forecast_horizon=forecast_horizon
         self.lookback_window=lookback_window
         self.trend_order=trend_order
         self.block_length=block_length
-        
-        stack = self._create_stack(input_tensor)
-        outputs = [stack.output[1]]
+        backcast, forecast = self._create_stack()(input_tensor)
+        outputs = [forecast]
         for index in range(stack_length):
-            self._swap_stack_weight()
-            stack = self._create_stack(stack.outputs[0])(stack)
-            outputs.append(stack.output[1])
+          #  self._swap_stack_weight()
+            backcast, forecast = self._create_stack()(backcast)
+            outputs.append(forecast)
         output_tensor = add(outputs)
         super().__init__(inputs=[input_tensor], outputs=[output_tensor], *args, **kwargs)
-
-    def _create_stack(self,input_tensor: Input):
-        model = NBeatsStack(input_tensor=input_tensor,
+        
+    def _create_stack(self):
+        model = NBeatsStack(
         fc_width=self.fc_width,
         forecast_horizon=self.forecast_horizon,
         lookback_window=self.lookback_window,
@@ -231,6 +247,13 @@ class NBeats(tf.keras.models.Model):
 # %%
 test_nbeats = NBeats(4,12,10,4,100,4)
 
+
 # %%
+
+# %%
+
+
+# %%
+
 
 # %%
