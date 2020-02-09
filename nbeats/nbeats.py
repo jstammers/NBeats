@@ -53,19 +53,19 @@ class NBeatsBlock(tf.keras.models.Model):
             forecast_horizon, lookback_window, trend_order, stack_weights
         )
 
-        backcast_layer = Dense(units=lookback_window, use_bias=False, activation='linear')(block)
+        backcast_layer = Dense(units=trend_order, use_bias=False, activation='linear')(block)
         
         backcast_layer = Dense(
-            units=backcast_weights.shape[1],
+            units=lookback_window,
             weights=[backcast_weights],
             activation = 'linear',
             use_bias = False,
             name=f"{base_name}_backcast",
         )(backcast_layer)
 
-        forecast_layer = Dense(units=forecast_horizon, use_bias=False, activation='linear', )(block)
+        forecast_layer = Dense(units=trend_order, use_bias=False, activation='linear', )(block)
         forecast_layer = Dense(
-            units = forecast_weights.shape[1],
+            units = forecast_horizon,
             weights=[forecast_weights],
             activation = 'linear',
             use_bias = False,
@@ -96,10 +96,10 @@ class NBeatsBlock(tf.keras.models.Model):
         if stack_weights == StackWeight.trend:
             forecast_weights = np.array(
                 [forward_tvec ** i for i in range(0, trend_order)]
-            ).T
+            )
             backcast_weights = np.array(
                 [backwards_tvec ** i for i in range(0, trend_order)]
-            ).T
+            )
         elif stack_weights == StackWeight.seasonality:
             forecast_weights = [
                 np.ones_like(forward_tvec),
