@@ -1,20 +1,25 @@
 import pytest
-from nbeats.nbeats import NBeats
-from tensorflow.keras import Input
+from nbeats.nbeats import NBeats, NBeatsBlock, NBeatsStack, StackWeight, test_block
+from tensorflow.keras.layers import Layer
+
 
 @pytest.fixture(scope='module')
-def nbeats():
-    return NBeats(forecast_horizon=1, lookback_window=3, block_length=3, stack_length=3, fc_stack_dim=[1,2,3,4])
+def nbeats_test_params():
+    test_args = {
+    "input_shape": (None, 3),
+    "fc_width": 1,
+    "forecast_horizon": 2,
+    "lookback_window": 3,
+    "trend_order": 4,
+    "stack_weights": StackWeight.trend,
+    }
+    return test_args
 
-def test_create_basic_block(nbeats: NBeats):
-    input_tensor = Input(shape=(None,1))
-    f_layer, b_layer = nbeats.create_basic_block(input_tensor,0,0)
-    assert f_layer.shape[-1] == 1
-    assert b_layer.shape[-1] == nbeats.forecast_horizon
+def test_create_block(nbeats_test_params):
+    test_block = NBeatsBlock(**nbeats_test_params)
+    assert isinstance(test_block,Layer)
 
-def test_create_stack(nbeats: NBeats):
-    input_tensor = Input(shape=(None,1))
-    output = nbeats.create_stack(input_tensor,0)
-    
-
-
+def test_build_block(nbeats_test_params):
+    test_block = NBeatsBlock(**nbeats_test_params) 
+    test_block.build(input_shape=4)
+    assert test_block.input.shape == (None, 4)
