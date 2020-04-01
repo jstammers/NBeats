@@ -1,0 +1,7 @@
+nbeats.py:
+    NBeats:
+        trend_order: 3
+        fc_layers: 4
+        block_layers: 4
+        stack_layers: 4
+        fc_units: 2048

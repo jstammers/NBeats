@@ -6,7 +6,7 @@ A representation of the N-Beats model
 # %%
 import tensorflow as tf
 from tensorflow import keras
-import nbeats.config as config
+from nbeats.config import NBeatsConfig
 from enum import Enum
 import numpy as np
 from typing import List, Union, Tuple
@@ -27,31 +27,30 @@ class StackWeight(Enum):
 # %%
 class NBeatsBlock(keras.layers.Layer):
     def __init__(
-        self,
-        input_shape: int,
-        fc_width: int,
-        forecast_horizon: int,
-        lookback_window: int,
-        stack_weights: StackWeight = StackWeight.none,
-        base_name: str = "default",
-        *args,
-        **kwargs,
+            self,
+            forecast_horizon: int,
+            lookback_window: int,
+            config: NBeatsConfig,
+            stack_weights: str = StackWeight.none,
+            base_name: str = "default",
+            *args,
+            **kwargs,
     ):
         """Creates a basic block layer. This outputs a back-cast of its input as well as a forecast with a length equal to the forecast horizon.
         """
         super(NBeatsBlock, self).__init__(*args, **kwargs)
         self.stack_weights = stack_weights
-        self.fc_width = fc_width
         self.forecast_horizon = forecast_horizon
         self.lookback_window = lookback_window
         self.base_name = base_name
+        self.config = config
         self.init_layers = [
             keras.layers.Dense(
-                self.fc_width,
+                self.config.fc_units,
                 activation=tf.keras.activations.relu,
                 name=f"{self.base_name}_fc_layer_{i}",
             )
-            for i in range(0,config.FC_LAYER_NUM)
+            for i in range(0, self.config.fc_layers)
         ]
         self.backcast_weights, self.forecast_weights = self.create_output_weights()
         self.backcast_projection = keras.layers.Dense(
@@ -79,9 +78,9 @@ class NBeatsBlock(keras.layers.Layer):
     def build(self, input_shape):
         super(NBeatsBlock, self).build(input_shape)
 
-    def call(self, input_layer: keras.Input):
-        self._check_input_shape(input_layer)
-        block = input_layer       
+    def call(self, inputs: keras.Input, **kwargs):
+        self._check_input_shape(inputs)
+        block = inputs
         for layer in self.init_layers:
             block = layer(block)
 
@@ -93,23 +92,25 @@ class NBeatsBlock(keras.layers.Layer):
 
         forecast_layer = self.forecast_layer(forecast_layer)
 
-        return [keras.layers.subtract([backcast_layer, input_layer]), forecast_layer]
+        return [keras.layers.subtract([backcast_layer, inputs]), forecast_layer]
 
     def compute_output_shape(self, input_shape):
         return [self.lookback_window, self.forecast_horizon]
 
     def create_output_weights(self) -> Tuple[np.array, np.array]:
 
-        forward_tvec = np.arange(0, self.forecast_horizon) / self.forecast_horizon
-        backwards_tvec = np.arange(0, self.lookback_window) / self.lookback_window
+        forward_time_vec = np.arange(0, self.forecast_horizon) / self.forecast_horizon
+        backwards_time_vec = np.arange(0, self.lookback_window) / self.lookback_window
 
         if self.stack_weights == StackWeight.trend:
-            trend_arr = np.arange(0, config.TREND_ORDER)
-            forecast_weights = np.power(forward_tvec[:,np.newaxis],trend_arr).T
-            backcast_weights = np.power(backwards_tvec[:,np.newaxis],trend_arr).T
+            trend_arr = np.arange(0, self.config.trend_order)
+            forecast_weights = np.power(forward_time_vec[:, np.newaxis], trend_arr).T
+            backcast_weights = np.power(backwards_time_vec[:, np.newaxis], trend_arr).T
         elif self.stack_weights == StackWeight.seasonality:
-            forecast_weights = self.seasonal_coeffs(forward_tvec, self.forecast_horizon)
-            backcast_weights = self.seasonal_coeffs(backwards_tvec, self.lookback_window)
+            forecast_weights = self.seasonal_coeffs(forward_time_vec, self.forecast_horizon)
+            backcast_weights = self.seasonal_coeffs(
+                backwards_time_vec, self.lookback_window
+            )
         else:
             forecast_weights = None
             backcast_weights = None
@@ -129,51 +130,52 @@ class NBeatsBlock(keras.layers.Layer):
     def _check_input_shape(self, input_layer: keras.Input):
         input_shape = input_layer.shape[1]
         if input_shape != self.lookback_window:
-            raise Exception(f"Dimension of input tensor {input_shape} does not match the value expected {self.lookback_window}")
+            raise Exception(
+                f"Dimension of input tensor {input_shape} does not match the value expected {self.lookback_window}"
+            )
+
+
 # %% [markdown]
 # Defining an NBeats stack
 # %%
 class NBeatsStack(tf.keras.layers.Layer):
     def __init__(
-        self,
-        fc_width: int,
-        forecast_horizon: int,
-        lookback_window: int,
-        block_length: int,
-        stack_weights: StackWeight = StackWeight.none,
-        *args,
-        **kwargs,
+            self,
+            forecast_horizon: int,
+            lookback_window: int,
+            stack_weights: str,
+            config: NBeatsConfig,
+            *args,
+            **kwargs,
     ) -> None:
-        self.fc_width = fc_width
         self.forecast_horizon = forecast_horizon
         self.lookback_window = lookback_window
         self.stack_weights = stack_weights
-        self.block_length = block_length
-        super(NBeatsStack, self).__init__(**kwargs)
+        self.config = config
+        super(NBeatsStack, self).__init__(*args,**kwargs)
 
     def build(self, input_shape):
         super(NBeatsStack, self).build(input_shape)
 
-    def call(self, input_layer):
+    def call(self, inputs: keras.layers.Layer, **kwargs):
         model = NBeatsBlock(
-            input_shape=input_layer.shape,
-            fc_width=self.fc_width,
+            input_shape=inputs.shape,
             forecast_horizon=self.forecast_horizon,
             lookback_window=self.lookback_window,
-            trend_order=self.trend_order,
             stack_weights=self.stack_weights,
+            config=self.config
         )
-        backcast, forecast = model(input_layer)
+        backcast, forecast = model(inputs)
         backcasts = [backcast]
         forecasts = [forecast]
-        for i in range(1, self.block_length):
+        for i in range(1, self.block_layers):
             backcast, forecast = model(backcast)
             backcasts.append(backcast)
             forecasts.append(forecast)
         return [backcasts[-1], keras.layers.add(forecasts)]
 
     def compute_output_shape(self, input_shape):
-        [self.lookback_window, self.forecast_horizon]
+        return [self.lookback_window, self.forecast_horizon]
 
 
 # %%
@@ -184,15 +186,12 @@ class NBeatsStack(tf.keras.layers.Layer):
 # %%
 class NBeats(keras.Model):
     def __init__(
-        self,
-        forecast_horizon: int,
-        lookback_window: int,
-        block_length: int,
-        stack_length: int,
-        fc_width: int,
-        trend_order: int = 3,
-        *args,
-        **kwargs,
+            self,
+            forecast_horizon: int,
+            lookback_window: int,
+            config: NBeatsConfig,
+            *args,
+            **kwargs,
     ) -> None:
         """Creates an N-Beats model
         
@@ -210,14 +209,12 @@ class NBeats(keras.Model):
         input_tensor = keras.Input(shape=(lookback_window,))
 
         self.stack_weight = StackWeight.trend
-        self.fc_width = fc_width
         self.forecast_horizon = forecast_horizon
         self.lookback_window = lookback_window
-        self.trend_order = trend_order
-        self.block_length = block_length
+        self.config = config
         backcast, forecast = self._create_stack()(input_tensor)
         outputs = [forecast]
-        for index in range(stack_length):
+        for index in range(self.config.stack_layers):
             #  self._swap_stack_weight()
             backcast, forecast = self._create_stack()(backcast)
             outputs.append(forecast)
@@ -226,14 +223,14 @@ class NBeats(keras.Model):
             inputs=[input_tensor], outputs=[output_tensor], *args, **kwargs
         )
 
-    def _create_stack(self):
+    def _create_stack(
+            self,
+    ):
         model = NBeatsStack(
-            fc_width=self.fc_width,
             forecast_horizon=self.forecast_horizon,
             lookback_window=self.lookback_window,
-            trend_order=self.trend_order,
             stack_weights=self.stack_weight,
-            block_length=self.block_length,
+            config=self.config,
         )
         return model
 
@@ -244,19 +241,3 @@ class NBeats(keras.Model):
             self.stack_weight = StackWeight.trend
         else:
             raise ValueError("Cannot swap StackWeight")
-
-
-# %%
-if __name__ == "__main__":
-    test_input = keras.Input(shape=4)
-    test_args = {
-        "input_shape": (None, 4),
-        "fc_width": 5,
-        "forecast_horizon": 20,
-        "lookback_window": 4,
-        "trend_order": 3,
-        "stack_weights": StackWeight.trend,
-    }
-    test_block = NBeatsBlock(**test_args, dynamic=True)
-    test_2 = test_block(tf.ones(shape=(5, 1)))
-    test_stack = NBeatsStack(**test_args, block_length=3, dynamic=True)(test_input)
