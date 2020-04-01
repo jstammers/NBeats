@@ -1,3 +1,6 @@
 .vscode
 .pytest_cache
-__pycache__
+__pycache__.env
+.idea
+.mypy_cahce
+.mypy_cache
